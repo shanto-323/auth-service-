@@ -4,7 +4,6 @@ import (
 	"database/sql"
 
 	_ "github.com/go-sql-driver/mysql"
-	"golang.org/x/crypto/bcrypt"
 )
 
 type Storage interface {
@@ -91,9 +90,4 @@ func (db *Db) UpdateAccount(memberID *Auth) error {
 
 func (db *Db) DeleteAccount(id int) error {
 	return nil
-}
-
-func checkPassword(password string, hashedPassword string) error {
-	err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password))
-	return err
 }
