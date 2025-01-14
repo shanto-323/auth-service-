@@ -1,14 +1,19 @@
 package main
 
 type Auth struct {
-	Username       string `json:"string"`
-	Id             int64  `json:"id"`
-	HashedPassword string `json:"password"`
+	Username string   `json:"username"`
+	Id       int64    `json:"id"`
+	Password Password `json:"password"`
 }
 
-func CreateAuth(username string, hashedPassword string) *Auth {
+type Password struct {
+	HashedPassword  string `json:"-_"`
+	Active          bool   `json:"active"`
+}
+
+func CreateAuth(username string, password Password) *Auth {
 	return &Auth{
-		Username:       username,
-		HashedPassword: hashedPassword,
+		Username: username,
+		Password: password,
 	}
 }
