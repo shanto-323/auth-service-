@@ -2,13 +2,15 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
 type Storage interface {
-	CreateAccount(memberID *Auth,refresh_token string) error
-	VerifyAccount(userName string, password string) (bool, error)
+	CreateAccount(memberID *Auth) (*Auth, error)
+	GetAccountById(id int) (*Auth, error)
+	VerifyAccount(userName string, password string) (*Auth, bool, error)
 	UpdateAccount(memberID *Auth) error
 	DeleteAccount(id int) error
 }
@@ -28,9 +30,7 @@ func CreateDb() (*Db, error) {
 		return nil, err
 	}
 
-	return &Db{
-		db: db,
-	}, nil
+	return &Db{db: db}, nil
 }
 
 func (db *Db) init() error {
@@ -39,7 +39,6 @@ func (db *Db) init() error {
       id SERIAL PRIMARY KEY,
       username        VARCHAR(255)  NOT NULL UNIQUE,
       password        VARCHAR(255)  NOT NULL,
-      refresh_token   TEXT          NOT NULL,
       active          BOOLEAN
     )
   `
@@ -50,51 +49,48 @@ func (db *Db) init() error {
 	return nil
 }
 
-func (db *Db) CreateAccount(memberID *Auth, refresh_token string) error {
+func (db *Db) CreateAccount(memberID *Auth) (*Auth, error) {
 	quary := `  
-    INSERT INTO auth (username , password, refresh_token,active)
-    VALUES(?,?,?,?) 
+    INSERT INTO auth (username ,password ,active)
+    VALUES(?,?,?) 
   `
-	_, err := db.db.Query(
-		quary, memberID.Username,
+	rows, err := db.db.Exec(
+		quary,
+		memberID.Username,
 		memberID.Password.HashedPassword,
-		refresh_token,
 		memberID.Password.Active,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+
+	lastInserId, err := rows.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	return db.GetAccountById(int(lastInserId))
 }
 
-func (db *Db) VerifyAccount(username string, password string) (bool, error) {
-	var auth Auth
-	quary := `  
-    SELECT id , username , password FROM auth WHERE username = ?
-  `
-	row := db.db.QueryRow(quary, username)
-	err := row.Scan(
-		&auth.Id,
-		&auth.Username,
-		&auth.Password.HashedPassword,
-		&auth.Password.Active, //Chech if user is active (later)
-	)
-
+func (db *Db) VerifyAccount(username string, password string) (*Auth, bool, error) {
+	user := &Auth{}
+	rows, err := db.db.Query("SELECT * FROM auth WHERE username=?", username)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			// Return false if data not exist
-			return false, nil
+			return nil, false, nil
 		}
-		// Database error
-		return false, err
+		return nil, false, fmt.Errorf("database error: %w", err)
 	}
-	err = checkPassword(password, auth.Password.HashedPassword)
-	if err != nil {
-		// Username exists but password not match
-		return true, err
+	defer rows.Close()
+	for rows.Next() {
+		if user, err = getAccount(rows); err != nil {
+			return nil, true, err
+		}
 	}
-	// Return true if data exist and password matched
-	return true, nil
+
+	if err = checkPassword(password, user.Password.HashedPassword); err != nil {
+		return nil, true, fmt.Errorf("password not match: %w", err)
+	}
+	return user, true, nil
 }
 
 func (db *Db) UpdateAccount(memberID *Auth) error {
@@ -103,4 +99,29 @@ func (db *Db) UpdateAccount(memberID *Auth) error {
 
 func (db *Db) DeleteAccount(id int) error {
 	return nil
+}
+
+func (db *Db) GetAccountById(id int) (*Auth, error) {
+	rows, err := db.db.Query("SELECT * FROM auth WHERE id=?", id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		return getAccount(rows)
+	}
+	return nil, fmt.Errorf("account %v not found", id)
+}
+
+func getAccount(rows *sql.Rows) (*Auth, error) {
+	userAccount := &Auth{}
+	err := rows.Scan(
+		&userAccount.Id,
+		&userAccount.Username,
+		&userAccount.Password.HashedPassword,
+		&userAccount.Password.Active)
+	if err != nil {
+		return nil, err
+	}
+	return userAccount, nil
 }

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -24,7 +26,8 @@ func (a *api) run() {
 	router := chi.NewRouter()
 
 	router.HandleFunc("/create", handlerFunc(a.CreateAccount))
-	router.HandleFunc("/login", handlerFunc(a.VerifyAccount))
+	router.HandleFunc("/login", handlerFunc(a.Login))
+	router.HandleFunc("/account/{id}", withJwt(handlerFunc(a.GetAccountById), a.Store))
 
 	fmt.Println("Api running...")
 	err := http.ListenAndServe(":8080", router)
@@ -35,8 +38,7 @@ func (a *api) run() {
 
 func handlerFunc(f func(w http.ResponseWriter, r *http.Request) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		err := f(w, r)
-		if err != nil {
+		if err := f(w, r); err != nil {
 			WriteJson(w, http.StatusBadRequest, Error{Error: err.Error()})
 		}
 	}
@@ -46,80 +48,78 @@ func (a *api) CreateAccount(w http.ResponseWriter, r *http.Request) error {
 	if r.Method != http.MethodPost {
 		return WriteJson(w, http.StatusMethodNotAllowed, Error{Error: "method not allowed"})
 	}
-
-	username := r.FormValue("username")
-	password := r.FormValue("password")
-	if len(username) < 8 || len(password) < 8 {
-		return WriteJson(w, http.StatusNotAcceptable, Error{Error: "not enough length"})
+	req := &Request{}
+	if err := json.NewDecoder(r.Body).Decode(req); err != nil {
+		return WriteJson(w, http.StatusBadRequest, req)
+	}
+	if err := checkLength(req.Username, req.Password); err != nil {
+		return WriteJson(w, http.StatusNotAcceptable, Error{Error: err.Error()})
 	}
 
-	accExist, err := a.Store.VerifyAccount(username, password) //Create another function for just verify the user (later)
-	if err != nil {
-		return WriteJson(w, http.StatusBadRequest, Error{Error: err.Error()})
-	}
-	// If account already exists in database
-	if accExist == true {
+	_, exist, err := a.Store.VerifyAccount(req.Username, req.Password)
+	if err != nil && !exist {
 		return WriteJson(w, http.StatusNotAcceptable, Error{Error: "account already exists"})
 	}
 
-	//Create hash password
-	hashPassword, err := HashPassword(password)
+	hashPassword, err := HashPassword(req.Password)
 	if err != nil {
 		return WriteJson(w, http.StatusBadRequest, Error{Error: err.Error()})
 	}
 
-	//Create jwt token
-	jwtToken, err := createJWT(username, hashPassword)
-	if err != nil {
-		return WriteJson(w, http.StatusBadRequest, Error{Error: err.Error()})
-	}
-
-	authUser := CreateAuth(username, Password{HashedPassword: hashPassword, Active: true})
-
-	// Create refresh token
-	refreshToken, err := createRefreshToken(authUser)
-	if err != nil {
-		return WriteJson(w, http.StatusBadRequest, Error{Error: err.Error()})
-	}
-
+	user := CreateAuth(req.Username, Password{HashedPassword: hashPassword, Active: true})
 	//Save account in database
-	err = a.Store.CreateAccount(authUser, refreshToken)
+	account, err := a.Store.CreateAccount(user)
 	if err != nil {
 		return WriteJson(w, http.StatusBadRequest, Error{Error: err.Error()})
 	}
-
-	return WriteJson(w, http.StatusOK, map[string]string{
-		"jwt_token":     jwtToken,
-		"refresh_token": refreshToken,
+	//Create jwt token
+	jwtToken, err := createJWT(account)
+	if err != nil {
+		return WriteJson(w, http.StatusBadRequest, Error{Error: err.Error()})
+	}
+	return WriteJson(w, http.StatusOK, Response{
+		Username: account.Username,
+		Token:    jwtToken,
 	})
 }
 
-// ie login into account
-func (a *api) VerifyAccount(w http.ResponseWriter, r *http.Request) error {
+func (a *api) Login(w http.ResponseWriter, r *http.Request) error {
 	if r.Method != http.MethodGet {
-		return WriteJson(w, http.StatusBadRequest, Error{Error: "Method Not Allowed"})
+		return WriteJson(w, http.StatusBadRequest, Error{Error: "method not allowed"})
 	}
+	req := &Request{}
+	if err := json.NewDecoder(r.Body).Decode(req); err != nil {
+		return WriteJson(w, http.StatusBadRequest, err.Error())
+	}
+	if err := checkLength(req.Username, req.Password); err != nil {
+		return WriteJson(w, http.StatusNotAcceptable, Error{Error: err.Error()})
+	}
+	account, exist, err := a.Store.VerifyAccount(req.Username, req.Password)
+	if err != nil && !exist {
+		return WriteJson(w, http.StatusNotAcceptable, Error{Error: "user not found"})
+	}
+	//Create jwt token
+	jwtToken, err := createJWT(account)
+	if err != nil {
+		return WriteJson(w, http.StatusBadRequest, Error{Error: err.Error()})
+	}
+	return WriteJson(w, http.StatusOK, Response{
+		Username: account.Username,
+		Token:    jwtToken,
+	})
+}
 
-	username := r.FormValue("username")
-	password := r.FormValue("password")
-	if len(username) < 8 || len(password) < 8 {
-		return WriteJson(w, http.StatusBadRequest, Error{Error: "not enough lenght"})
+func (a *api) GetAccountById(w http.ResponseWriter, r *http.Request) error {
+	idString := chi.URLParam(r, "id")
+	id, err := strconv.Atoi(idString)
+	if err != nil {
+		return WriteJson(w, http.StatusBadRequest, err.Error())
 	}
-
-	accExist, err := a.Store.VerifyAccount(username, password)
-	switch accExist {
-	case false:
-		if err != nil {
-			return WriteJson(w, http.StatusInternalServerError, Error{Error: "Database Error"})
-		} else {
-			return WriteJson(w, http.StatusBadRequest, Error{Error: "User Not Exists"})
-		}
-	case true:
-		if err != nil {
-			return WriteJson(w, http.StatusBadRequest, Error{Error: "Wrong Password"})
-		}
+	user, err := a.Store.GetAccountById(id)
+	if err != nil {
+		return WriteJson(w, http.StatusBadRequest, err.Error())
 	}
-	return nil
+	return WriteJson(w, http.StatusOK, user)
 }
 
 func (a *api) UpdateAccount(w http.ResponseWriter, r *http.Request) error {
